@@ -6,9 +6,9 @@
 
 Forecasts Grand Theft Auto VI's launch-day Twitch concurrent viewers, hour by hour (hours 2–24 of 19 Nov 2026 UTC), as five quantiles per hour, anchored on the hour-1 print.
 
-Method: work in log space. Each comparable launch gives a release-day log-ratio curve `d_h = ln(viewers_h) − ln(viewers_1)`. Only console-only comparables (no PC) are kept — their rolling-midnight unlock shapes match a console-only single-player launch, while PC/simultaneous launches have wildly different curves. The centre per hour is the console median curve, adjusted by the target game's own pre-release spike (`prepeak = ln(max pre-release hourly / mean of last-24h pre-release hourly)`) through a per-hour OLS slope fitted on the console comparables. The spread per hour is the console IQR of `d_h` / 1.349, as a normal log-spread. Everything is computed at runtime from the case file itself; the program runs offline on the standard library only.
+Method: work in log space. Each comparable launch gives a release-day log-ratio curve `d_h = ln(viewers_h) − ln(viewers_1)`. Only console-only comparables (no PC) are kept — their rolling-midnight unlock shapes match a console-only single-player launch, while PC/simultaneous launches have wildly different curves. The centre and spread per hour come from a three-predictor OLS fit of `d_h` on the target's pre-release features — `prepeak` (ln(max pre-release hourly / mean of last-24h pre-release hourly)), `r24` (ln(hour-1 print / mean of last-24h pre-release hourly)) and `vph` (ln(hour-1 viewers per live channel)) — fitted on the console comparables, with residual SD as the log-spread (IQR/1.349 median fallback). Target features are clamped to the pool's observed range, missing ones fall back to the pool mean. For the GTA VI final the prepeak peak also counts the GTA VI category's own pre-release series over the 14 days before release day, since the case's recorder history only covers about two days. Everything is computed at runtime from the case file itself; the program runs offline on the standard library only.
 
-Validation (practice cases, scored against SullyGnome's hourly answers): mean pinball loss **0.2241** — Wolverine 0.4376, Red Dead Redemption 2 0.1852, God of War Ragnarök 0.1252, Spider-Man 2 0.1483 — versus the house baseline's 0.3871. Leave-one-out over the console comparables: 0.1608.
+Validation (practice cases, scored against SullyGnome's hourly answers): mean pinball loss **0.1858** — Wolverine 0.3191, Red Dead Redemption 2 0.1188, God of War Ragnarök 0.1307, Spider-Man 2 0.1745 — versus the house baseline's 0.3871 and the previous version's 0.2241. Leave-one-out over the console comparables: 0.1161 (0.1269 in the final-pool simulation that also includes the practice launches).
 
 ## Run it
 
@@ -16,7 +16,7 @@ Validation (practice cases, scored against SullyGnome's hourly answers): mean pi
 MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
 
-Reads every `*.in` case in `$MAKEFUN_INPUT_DIR` (default `/input`) and writes one `*.out` forecast per case to `$MAKEFUN_OUTPUT_DIR` (default `/output`). Deterministic, about 0.08 s per case.
+Reads every `*.in` case in `$MAKEFUN_INPUT_DIR` (default `/input`) and writes one `*.out` forecast per case to `$MAKEFUN_OUTPUT_DIR` (default `/output`). Deterministic, about 0.14 s per case.
 
 ---
 
