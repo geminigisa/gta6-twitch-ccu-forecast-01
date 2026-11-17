@@ -9,15 +9,21 @@ Method (log-ratio shape model, fitted at runtime from the case itself):
     rolling-midnight unlock shapes match a console-only single-player
     launch; PC / simultaneous-unlock launches have wildly different
     curves and would blow up the spread.
-  * Centre per hour: a three-predictor OLS fit of d_h on the target's
+  * Centre per hour: a four-predictor OLS fit of d_h on the target's
     pre-release features over the console comparables -- prepeak
     (ln(max pre-release hourly / mean of the last 24 pre-release
     hours)), r24 (ln(hour-1 print / mean of the last 24 pre-release
-    hours)) and vph (ln(hour-1 viewers per live channel)).  A low
+    hours)), vph (ln(hour-1 viewers per live channel)) and trend24
+    (OLS slope of log viewers against days over the last 24
+    pre-release hours: the final day's hype acceleration).  A low
     viewers-per-channel at hour 1 means the big streamers have not
     started yet, so the day rises more; a depressed hour-1 relative
-    to the pre-release level means the same.  Target features are
-    clamped to the pool's observed range, so the fit never
+    to the pre-release level means the same; a steeper last-day
+    slope means a faster-rising launch.  The 24h window is exactly
+    one diurnal cycle (no day/night bias) and is fully covered by
+    the final case's ~2-day recorder history, so pool and target use
+    the same definition with no extension needed.  Target features
+    are clamped to the pool's observed range, so the fit never
     extrapolates beyond the launches it was fitted on.
   * Spread per hour: the residual standard deviation of that OLS fit
     (floored at 0.15), as a normal log-spread; quantiles
@@ -81,19 +87,21 @@ def ols_slope(xs, ys):
     return b, my - b * mx
 
 
-def ols3(rows, ys):
-    """Least-squares fit y ~ b0 + b1*x1 + b2*x2 + b3*x3.
+def ols_n(rows, ys):
+    """Least-squares fit y ~ b0 + b.x for any number of predictors.
 
-    rows: list of (x1, x2, x3); ys: list of y.  Returns (beta, resid_sd)
-    or None when the system is singular or too small to fit.
+    rows: list of feature tuples; ys: list of y.  Returns (beta, resid_sd)
+    or None when the system is singular or too small to fit (needs at
+    least len(row) + 4 cases, so the residual degrees of freedom stay
+    honest on a small pool).
     """
     n = len(ys)
-    if n < 7:
+    if not rows or n < len(rows[0]) + 4:
         return None
-    dim = 4
+    dim = len(rows[0]) + 1
     mat = [[0.0] * (dim + 1) for _ in range(dim)]
-    for (x1, x2, x3), y in zip(rows, ys):
-        feats = (1.0, x1, x2, x3)
+    for row, y in zip(rows, ys):
+        feats = (1.0,) + tuple(row)
         for i in range(dim):
             for j in range(dim):
                 mat[i][j] += feats[i] * feats[j]
@@ -111,8 +119,8 @@ def ols3(rows, ys):
                 mat[r][cc] -= fac * mat[col][cc]
     beta = [mat[i][dim] / mat[i][i] for i in range(dim)]
     ss = 0.0
-    for (x1, x2, x3), y in zip(rows, ys):
-        pred = beta[0] + beta[1] * x1 + beta[2] * x2 + beta[3] * x3
+    for row, y in zip(rows, ys):
+        pred = beta[0] + sum(beta[j + 1] * row[j] for j in range(len(row)))
         ss += (y - pred) ** 2
     sd = math.sqrt(ss / max(1, n - dim))
     return beta, sd
@@ -320,6 +328,49 @@ def target_vph(case):
     return math.log(viewers / channels)
 
 
+def _log_slope_24h(pts, day):
+    """OLS slope of log viewers against days over [day-24h, day).
+
+    One full diurnal cycle, so the day/night pattern cannot bias the
+    slope.  Needs at least 6 points in the window.
+    """
+    sel = [(when, v) for when, v in pts
+           if day - timedelta(hours=24) <= when < day]
+    if len(sel) < 6:
+        return None
+    xs = [(when - day).total_seconds() / 86400.0 for when, _ in sel]
+    ys = [math.log(v) for _, v in sel]
+    mx = sum(xs) / len(xs)
+    my = sum(ys) / len(ys)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+
+
+def comparable_trend24(comparable):
+    """Last-day pre-release log slope for a comparable."""
+    day = parse_time(comparable["day_start"])
+    pts = []
+    for point in comparable.get("hourly") or []:
+        viewers = point.get("viewers")
+        if not viewers or viewers <= 0:
+            continue
+        try:
+            when = parse_time(point["from"])
+        except (KeyError, ValueError):
+            continue
+        if when < day:
+            pts.append((when, float(viewers)))
+    return _log_slope_24h(pts, day)
+
+
+def target_trend24(case):
+    """Last-day pre-release log slope for the target itself."""
+    day = parse_time(case["day_start"])
+    return _log_slope_24h(target_history_points(case), day)
+
+
 def forecast_case(case):
     known = case.get("known") or []
     p1 = 1.0
@@ -344,6 +395,7 @@ def forecast_case(case):
                 "prepeak": comparable_prepeak(comp),
                 "r24": comparable_r24(comp),
                 "vph": comparable_vph(comp),
+                "trend24": comparable_trend24(comp),
             })
     if not curves:
         return baseline_rows(p1)
@@ -353,11 +405,12 @@ def forecast_case(case):
 
     # Target features, clamped to the pool's observed range (a missing
     # one falls back to the pool mean, i.e. no adjustment from it).
-    feats = ("prepeak", "r24", "vph")
+    feats = ("prepeak", "r24", "vph", "trend24")
     target = {
         "prepeak": target_prepeak(case),
         "r24": target_r24(case),
         "vph": target_vph(case),
+        "trend24": target_trend24(case),
     }
     for key in feats:
         vals = [c[key] for c in pool if c[key] is not None]
@@ -369,7 +422,7 @@ def forecast_case(case):
         else:
             target[key] = min(max(target[key], min(vals)), max(vals))
 
-    # Per-hour centre and spread: a three-predictor OLS fit of the
+    # Per-hour centre and spread: a four-predictor OLS fit of the
     # log-ratio curve on the target's pre-release features, over the
     # console pool.  Falls back to the pool median + IQR spread when
     # too few complete cases carry the hour.
@@ -388,14 +441,16 @@ def forecast_case(case):
         sel = [c for c in pool
                if h in c["hours"] and all(c[k] is not None for k in feats)]
         if len(sel) >= 7:
-            fit = ols3([(c["prepeak"], c["r24"], c["vph"]) for c in sel],
-                       [math.log(c["hours"][h]) - math.log(c["hours"][1])
-                        for c in sel])
+            fit = ols_n([(c["prepeak"], c["r24"], c["vph"], c["trend24"])
+                         for c in sel],
+                        [math.log(c["hours"][h]) - math.log(c["hours"][1])
+                         for c in sel])
             if fit is not None:
                 beta, sd = fit
                 centre[h] = (beta[0] + beta[1] * target["prepeak"]
                              + beta[2] * target["r24"]
-                             + beta[3] * target["vph"])
+                             + beta[3] * target["vph"]
+                             + beta[4] * target["trend24"])
                 sigma[h] = max(sd, MIN_SIGMA)
 
     rows = []
